@@ -1,48 +1,26 @@
 #!/usr/bin/env python3
+#
+# RISC-V single core RV32I simulator.
+# The RV32I ISA is described in detail in 'The RISC-V Instruction Set Manual, Volume I: Unpriviledge ISA' and this
+# simulator is based on Document Version 2019-12-13. A copy of this document can be found under
+# 'documents/riscv-spec-20191213.pdf'.
+#
+# Author: Mikael Henriksson
+#
 from elftools.elf.elffile import ELFFile
 import struct
-import hexdump
-from enum import Enum
+from enum import Enum, auto
 
-# Instructions (40 in total):
-#
-# Integer Computational Instruction (Section 2.4)
-#   Register-Immediate:
-#       ADDI                (add immediate)
-#       SLTI                (set less than immediate)
-#       ANDI, ORI, XORI     (logical AND, OR and XOR)
-#       SLLI, SRLI, SRAI    (shift left/right logical/arithmetical immediate)
-#       LUI                 (load upper immediate)
-#       AUIPC               (add upper immediate to PC)
-#   Register-Register:
-#       ADD, SUB            (add/subtract)
-#       SLT, SLTU           (test less than [unsigned])
-#       AND, OR, XOR        (logical, AND, OR and XOR)
-#       SLL, SRL, SRA       (shift left/right logical/arithmetical)
-#   NOP Instruction:
-#       NOP                 (No operation [really it's ADDI x0, x0, 0])
-#
-# Control Transfer Instructions (Section 2.5)
-#   Unconditional Jumps:
-#       JAL, JALR           (jump and link [register])
-#   Conditional Branches:
-#       BEQ, BNE            (branch [not] equal)
-#       BLT, BGT            (branch less/greater than)
-#
-# Load and Store Instructions (Section 2.6)
-# Memory Ordering Instruction (Section 2.7)
-# Environment Call and Breakpoints (Section 2.8)
-# HINT Instructions (Section 2.9)
-#
 
 # Instruction formats, found at the top of Table 24.2
-class InstFormat(Enum): #  31          25 24     20 19     15 14    12 11          7 6      0
-    R = 0               # |    funct7    |   rs2   |   rs1   | funct3 |      rd     | opcode |
-    I = 1               # |        imm[11:0]       |   rs1   | funct3 |      rd     | opcode |
-    S = 2               # |   imm[11:5]  |   rs2   |   rs1   | funct3 |   imm[4:0]  | opcode |
-    B = 3               # | imm[12|10:5] |   rs2   |   rs1   | funct3 | imm[4:1|11] | opcode |
-    U = 4               # |                 imm[31:12]                |      rd     | opcode |
-    J = 5               # |           imm[20|10:1|11|19:12]           |      rd     | opcode |
+class InstFormat(Enum): # |31          25|24     20|19     15|14    12|11          7|6      0|
+                        # |--------------|---------|---------|--------|-------------|--------|
+    R = auto()          # |    funct7    |   rs2   |   rs1   | funct3 |      rd     | opcode |
+    I = auto()          # |         imm[11:0]      |   rs1   | funct3 |      rd     | opcode |
+    S = auto()          # |   imm[11:5]  |   rs2   |   rs1   | funct3 |   imm[4:0]  | opcode |
+    B = auto()          # | imm[12|10:5] |   rs2   |   rs1   | funct3 | imm[4:1|11] | opcode |
+    U = auto()          # |                 imm[31:12]                |      rd     | opcode |
+    J = auto()          # |           imm[20|10:1|11|19:12]           |      rd     | opcode |
 
 # Base opcodes, found in Table 24.1
 class BaseOp(Enum):
@@ -54,24 +32,30 @@ class BaseOp(Enum):
     OP_IMM  = 0b0010011
     OP      = 0b0110011
     SYSTEM  = 0b1110011
+    FENCE   = 0b0001111
     AUIPC   = 0b0010111
     LUI     = 0b0110111
 
-# Instructions, found in Table 24.1
-DONT_CARE = -1
-class Inst(Enum):
-    LUI     = (InstFormat.U, BaseOp.LUI,    DONT_CARE, DONT_CARE)
-    AUIPC   = (InstFormat.U, BaseOp.AUIPC,  DONT_CARE, DONT_CARE)
-    JAL     = (InstFormat.J, BaseOp.JAL,    DONT_CARE, DONT_CARE)
-    JALR    = (InstFormat.I, BaseOp.JALR,   DONT_CARE, DONT_CARE)
-    BEQ     = (InstFormat.B, BaseOp.BRANCH, 0b000,     DONT_CARE)
-    BNE     = (InstFormat.B, BaseOp.BRANCH, 0b001,     DONT_CARE)
-    BLT     = (InstFormat.B, BaseOp.BRANCH, 0b100,     DONT_CARE)
-    BGT     = (InstFormat.B, BaseOp.BRANCH, 0b101,     DONT_CARE)
+# Get Instruction format from a BaseOp
+def to_inst_format(baseop):
+    DICTIONARY = {
+        BaseOp.LOAD    : InstFormat.I,
+        BaseOp.STORE   : InstFormat.S,
+        BaseOp.BRANCH  : InstFormat.B,
+        BaseOp.JALR    : InstFormat.I,
+        BaseOp.JAL     : InstFormat.J,
+        BaseOp.OP_IMM  : InstFormat.I,
+        BaseOp.OP      : InstFormat.R,
+        BaseOp.SYSTEM  : InstFormat.I,
+        BaseOp.AUIPC   : InstFormat.U,
+        BaseOp.LUI     : InstFormat.U
+    }
+    return DICTIONARY[baseop]
 
-# Register file class. Note especially that register X0 always equals zero.
+# Register file of 32+1 registers. Note especially that register X0 always equal zero and that register X32 is the
+# program counter (PC) register.
 class Regfile:
-    PC=32
+    PC = 32
     def __init__(self):
         self.regfile = [0xDEADCAFE]*33
         self.regfile[0] = 0
@@ -82,8 +66,6 @@ class Regfile:
             self.regfile[reg] = val
 
 regfile = Regfile()
-
-PC=32
 
 # 64k memory at 0x80000000
 memory = b'\x00'*0x10000
@@ -114,128 +96,248 @@ def csr_r8(addr):
 def csr_w8(addr, val8):
     memory[addr] = val8
 
-def get_bits(n, idx_b, idx_t):
-    return (n >> idx_b) & ( (1 << (idx_t-idx_b+1)) - 1 )
+def get_bits(word, idx_b, idx_t):
+    return (word >> idx_b) & ( (1 << (idx_t-idx_b+1)) - 1 )
+
+def downto(up, down):
+    return (down, up)
+
+#
+# Decode the immediate part of an instruction. The immediate is always sign extended with the most significant bit of
+# the instruction inst(31).
+#
+#       |31          25|24     20|19     15|14    12|11          7|6      0|
+#       |--------------|---------|---------|--------|-------------|--------|
+#    I: |         imm[11:0]      |   rs1   | funct3 |      rd     | opcode |
+#    S: |   imm[11:5]  |   rs2   |   rs1   | funct3 |   imm[4:0]  | opcode |
+#    B: | imm[12|10:5] |   rs2   |   rs1   | funct3 | imm[4:1|11] | opcode |
+#    U: |                 imm[31:12]                |      rd     | opcode |
+#    J: |           imm[20|10:1|11|19:12]           |      rd     | opcode |
+#
+def imm_decode(inst):                   
+    opcode = get_bits(inst, *downto(6, 0))    
+    baseop = BaseOp(opcode)                   
+    inst_format = to_inst_format(baseop)      
+    if inst_format == InstFormat.R:           
+        return 0                              
+    elif inst_format == InstFormat.I:         
+        imm = get_bits(inst, *downto(31, 20))
+        return (0xFFFFF000 | imm) if ( inst & (1<<31) ) else imm
+    elif inst_format == InstFormat.S:
+        imm = (    (get_bits(inst, *downto(31, 25)) <<  5)
+                 | (get_bits(inst, *downto(11,  7)) <<  0)   )
+        return (0xFFFFF000 | imm) if (inst & (1<<31)) else imm
+    elif inst_format == InstFormat.B:
+        imm = (    (get_bits(inst, *downto(31, 31)) << 12)
+                 | (get_bits(inst, *downto(7 ,  7)) << 11)
+                 | (get_bits(inst, *downto(30, 25)) <<  5)
+                 | (get_bits(inst, *downto(11,  8)) <<  1)   )
+        return (0xFFFFE000 | imm) if (inst & (1<<31)) else imm
+    elif inst_format == InstFormat.U:
+        imm = ( get_bits(inst, *downto(31, 12)) << 12 )
+        return imm
+    elif inst_format == InstFormat.J:
+        imm = (    (get_bits(inst, *downto(31, 31)) << 20)
+                 | (get_bits(inst, *downto(19, 12)) << 12)
+                 | (get_bits(inst, *downto(20, 20)) << 11)
+                 | (get_bits(inst, *downto(30, 21)) <<  1)   )
+        return (0xFFF00000 | imm) if (inst & (1<<31)) else imm
+    else:
+        raise BaseException("Unknown instruction format")
+
+def funct_decode(inst):
+    funct3 = get_bits(inst, *downto(14, 12))
+    funct7 = get_bits(inst, *downto(31, 25))
+    return (funct3, funct7)
+
+def reg_decode(inst):
+    rd  =    get_bits(inst, *downto(11, 7))
+    rs1 =    get_bits(inst, *downto(19, 15))
+    rs2 =    get_bits(inst, *downto(24, 20))
+    return (rd, rs1, rs2)
 
 
-def get_rd(inst):
-    return get_bits(inst, 7, 11)
 
-def get_rs1(inst):
-    return get_bits(inst, 15, 19)
+def DEBUG_PRINT_ASSEMBLY(inst_cnt, PC, string):
+    print("i=" + str(inst_cnt).ljust(8) + "|   PC = " + hex(PC) + "    |    " + string)
 
-def get_rs2(inst):
-    return get_bits(inst, 20, 24)
-
-
-# For R-type, I-type, S-type and B-type instructions
-def get_funct3(inst):
-    return get_bits(inst, 12, 14)
-
-# For R-type instructions
-def get_funct7(inst):
-    return get_bits(inst, 25, 31)
-
-# For SYSTEM.PRIV functions (ECALL, EBREAK)
-def get_funct12(inst):
-    return get_bits(inst, 20, 31)
-
-# Get immediates from instruction
-def get_imm_i_type(inst):
-    return get_bits(inst, 20, 31)
-
-def get_imm_s_type(inst):
-    return get_bits(inst, 25, 31)
-
-def get_imm_u_type(inst):
-    return get_bits(inst, 12, 31)
-
-def get_imm_j_type(inst):
-    return get_bits(inst,31,31)<<20 | get_bits(inst,21,30)<<1 | get_bits(inst,20,20)<<11 | get_bits(inst,12,19)<<12
-
-# TODO: i=32 CSR register.
-
-FUNCT3_CSRRW = 0b001
-FUNCT3_CSRRS = 0b010
-FUNCT3_CSRRC = 0b011
-FUNCT3_CSRRWI = 0b101
-FUNCT3_CSRRSI = 0b110
-FUNCT3_CSRRCI = 0b111
-
-FUNCT3_ADDI = 0b000
-
-def step():
+def step(inst_cnt):
     # Dump registers.
-    dump_regs()
+    #print()
+    #dump_regs()
 
     # (1) Instructin fetch
-    inst = r32(regfile[PC])
+    inst = r32(regfile[Regfile.PC])
 
     # (2) Instruction decode
-    op = BaseOp(inst & 0x7F)
-    if op == BaseOp.JAL:
-        # Instruction on J-format
-        rd = get_rd(inst)
-        imm = get_imm_j_type(inst)
-        regfile[PC] += imm
-        if rd == 0:
+    base_op = BaseOp(get_bits(inst, *downto(6, 0)))
+    (rd, rs1, rs2)   = reg_decode(inst)
+    (funct3, funct7) = funct_decode(inst)
+    (imm)            = imm_decode(inst)
+
+    # (3) Instruction execute
+    if base_op == BaseOp.LUI:
+        raise NotImplementedError("LUI")
+    elif base_op == BaseOp.AUIPC:
+        raise NotImplementedError("AUIPC")
+    elif base_op == BaseOp.JAL:
+        DEBUG_PRINT_ASSEMBLY(inst_cnt, regfile[Regfile.PC], "J     " + hex(regfile[Regfile.PC] + imm))
+        if rd == 0: # Plain jump instruction
             pass
-        else:
-            raise NotImplementedError(str(op) + " rd != 0")
-    elif op == BaseOp.OP_IMM:
-        # Instruction on I-format
-        funct3 = get_funct3(inst)
-        if funct3 == FUNCT3_ADDI:
-            rs1 = get_rs1(inst)
-            rd = get_rd(inst)
-            imm = get_bits(inst, 20, 31) # TODO: Sign extend imm
-            regfile[rd] = regfile[rs1] + imm
-        else:
-            raise NotImplementedError(str(op) + "/" + str(funct3))
-        regfile[PC] += 4
-    elif op == BaseOp.SYSTEM:
-        funct3 = get_funct3(inst)
+        else: # Link to rd register
+            regfile[rd] = regfile[Regfile.PC] + 4
+        regfile[Regfile.PC] += imm
+    elif base_op == BaseOp.JALR:
+        raise NotImplementedError("JALR")
+    elif base_op == BaseOp.BRANCH:
         if funct3 == 0b000:
-            funct12 = get_funct12(inst)
-            if funct12 == 0b000000000000:
-                pass # ECALL
-            elif funct12 == 0b000000000001:
-                pass # EBREAK
-        elif funct3 == FUNCT3_CSRRW:
-            raise NotImplementedError(str(op) + "/" + "CSRRW")
-        elif funct3 == FUNCT3_CSRRS:
-            # Atomic Read and Set Bit in CSR
-            rd = get_rd(inst)
-            rs1 = get_rs1(inst)
-            csr = get_bits(inst, 20, 31)
-        elif funct3 == FUNCT3_CSRRC:
-            raise NotImplementedError(str(op) + "/" + "CSRRC")
-        elif funct3 == FUNCT3_CSRWI:
-            raise NotImplementedError(str(op) + "/" + "CSRRWI")
-        elif funct3 == FUNCT3_CSRRSI:
-            raise NotImplementedError(str(op) + "/" + "CSRRSI")
-        elif funct3 == FUNCT3_CSRRCI:
-            raise NotImplementedError(str(op) + "/" + "CSRRCI")
-        else:
-            raise NotImplementedError("Invalid instruction: " + str(op) + "funct3=" + str(funct3))
-        regfile[PC] += 4
-    else:
-        raise NotImplementedError(str(op))
+            raise NotImplementedError("BEQ")
+        elif funct3 == 0b001:
+            raise NotImplementedError("BNE")
+        elif funct3 == 0b100:
+            raise NotImplementedError("BLT")
+        elif funct3 == 0b101:
+            raise NotImplementedError("BGE")
+        elif funct3 == 0b110:
+            raise NotImplementedError("BLTU")
+        elif funct3 == 0b111:
+            raise NotImplementedError("BGEU")
+    elif base_op == BaseOp.LOAD:
+        if funct3 == 0b000:
+            raise NotImplementedError("LB")
+        elif funct3 == 0b001:
+            raise NotImplementedError("LH")
+        elif funct3 == 0b010:
+            raise NotImplementedError("LW")
+        elif funct3 == 0b100:
+            raise NotImplementedError("LBU")
+        elif funct3 == 0b101:
+            raise NotImplementedError("LHU")
+    elif base_op == BaseOp.STORE:
+        if funct3 == 0b000:
+            raise NotImplementedError("SB")
+        elif funct3 == 0b001:
+            raise NotImplementedError("SH")
+        elif funct3 == 0b010:
+            raise NotImplementedError("SW")
+    elif base_op == BaseOp.OP_IMM:
+        if funct3 == 0b000: # ADDI
+            if rs1 == 0:
+                DEBUG_PRINT_ASSEMBLY(inst_cnt, regfile[Regfile.PC],  "LI    " + ("X" + str(rd)).rjust(3) + ", " + str(imm))
+            elif imm == 0:
+                DEBUG_PRINT_ASSEMBLY(inst_cnt, regfile[Regfile.PC], "MV    " + ("X" + str(rd)) + ", " + str(rs1))
+            regfile[Regfile.PC] += 4
+            regfile[rd] = regfile[rs1] + imm
+        elif funct3 == 0b010:
+            raise NotImplementedError("SLTI")
+        elif funct3 == 0b011:
+            raise NotImplementedError("SLTIU")
+        elif funct3 == 0b111:
+            raise NotImplementedError("ANDI")
+        elif funct3 == 0b110:
+            raise NotImplementedError("ORI")
+        elif funct3 == 0b100:
+            raise NotImplementedError("XORI")
+        elif funct3 == 0b001:
+            raise NotImplementedError("SLLI")
+        elif funct3 == 0b101:
+            if funct7 == 0b0000000:
+                raise NotImplementedError("SRLI")
+            elif funct7 == 0b0100000:
+                raise NotImplementedError("SRAI")
+    elif base_op == BaseOp.OP:
+        if funct3 == 0b000:
+            if funct7 == 0b0000000:
+                raise NotImplementedError("ADD")
+            elif funct7 == 0b0100000:
+                raise NotImplementedError("SUB")
+        elif funct3 == 0b001:
+            raise NotImplementedError("SLL")
+        elif funct3 == 0b010:
+            raise NotImplementedError("SLT")
+        elif funct3 == 0b011:
+            raise NotImplementedError("SLTU")
+        elif funct3 == 0b100:
+            raise NotImplementedError("XOR")
+        elif funct3 == 0b101:
+            if funct7 == 0b0000000:
+                raise NotImplementedError("SRL")
+            elif funct7 == 0b0100000:
+                raise NotImplementedError("SRA")
+        elif funct3 == 0b110:
+            raise NotImplementedError("OR")
+        elif funct3 == 0b111:
+            raise NotImplementedError("AND")
+    elif base_op == BaseOp.FENCE:
+        raise NotImplementedError("FENCE")
+    elif base_op == BaseOp.SYSTEM:
+        raise NotImplementedError("SYSTEM")
+
+    return True
+
+    # ---- OLD ----
+    #if op == BaseOp.JAL:
+    #    # Instruction on J-format
+    #    rd = get_rd(inst)
+    #    imm = get_imm_j_type(inst)
+    #    regfile[PC] += imm
+    #    if rd == 0:
+    #        pass
+    #    else:
+    #        raise NotImplementedError(str(op) + " rd != 0")
+    #elif op == BaseOp.OP_IMM:
+    #    # Instruction on I-format
+    #    funct3 = get_funct3(inst)
+    #    if funct3 == FUNCT3_ADDI:
+    #        rs1 = get_rs1(inst)
+    #        rd = get_rd(inst)
+    #        imm = get_bits(inst, 20, 31) # TODO: Sign extend imm
+    #        regfile[rd] = regfile[rs1] + imm
+    #    else:
+    #        raise NotImplementedError(str(op) + "/" + str(funct3))
+    #    regfile[PC] += 4
+    #elif op == BaseOp.SYSTEM:
+    #    funct3 = get_funct3(inst)
+    #    if funct3 == 0b000:
+    #        funct12 = get_funct12(inst)
+    #        if funct12 == 0b000000000000:
+    #            pass # ECALL
+    #        elif funct12 == 0b000000000001:
+    #            pass # EBREAK
+    #    elif funct3 == FUNCT3_CSRRW:
+    #        raise NotImplementedError(str(op) + "/" + "CSRRW")
+    #    elif funct3 == FUNCT3_CSRRS:
+    #        # Atomic Read and Set Bit in CSR
+    #        rd = get_rd(inst)
+    #        rs1 = get_rs1(inst)
+    #        csr = get_bits(inst, 20, 31)
+    #    elif funct3 == FUNCT3_CSRRC:
+    #        raise NotImplementedError(str(op) + "/" + "CSRRC")
+    #    elif funct3 == FUNCT3_CSRWI:
+    #        raise NotImplementedError(str(op) + "/" + "CSRRWI")
+    #    elif funct3 == FUNCT3_CSRRSI:
+    #        raise NotImplementedError(str(op) + "/" + "CSRRSI")
+    #    elif funct3 == FUNCT3_CSRRCI:
+    #        raise NotImplementedError(str(op) + "/" + "CSRRCI")
+    #    else:
+    #        raise NotImplementedError("Invalid instruction: " + str(op) + "funct3=" + str(funct3))
+    #    regfile[PC] += 4
+    #else:
+    #    raise NotImplementedError(str(op))
 
     # (3) Instruction execute
     # (4) Access
     # (5) Write back
-    return True
+    #return True
 
 def dump_regs():
-    base_opcode = BaseOp(r32(regfile[PC]) & 0x7F)
-    print("  PC: 0x%08x ins: 0x%08x, base_opcode: %s" % (regfile[PC], r32(regfile[PC]), base_opcode))
+    base_opcode = BaseOp(r32(regfile[Regfile.PC]) & 0x7F)
+    print("  PC: 0x%08x ins: 0x%08x, base_opcode: %s" % (regfile[Regfile.PC], r32(regfile[Regfile.PC]), base_opcode))
     for i in range (4):
         for j in range(8):
             reg = j + i*8
             print(" %3s: 0x%08x" % ("X" + str(reg), regfile[reg]), end="")
         print("")
-    print("")
 
 # Load data into the memory at address.
 def mem_load(data, addr):
@@ -262,13 +364,14 @@ def load_elf(infile):
 
 if __name__ == '__main__':
     load_elf('riscv-tests/isa/rv32ui-p-add')
-    regfile[PC] = memory_offset
+    regfile[Regfile.PC] = memory_offset
     try:
-        print("i=0")
-        i = 1
-        while step() and i < 100:
-            print("i=" + str(i))
-            i += 1
+        inst_cnt = 0
+        running = True
+        while running and step(inst_cnt):
+            if inst_cnt > 100:
+                running = False
+            inst_cnt += 1
     except NotImplementedError as e:
-        print("Not implemented yet: '" + str(e) + "', exiting.")
-    
+        print("Instruction not implemented yet: '" + str(e) + "', exiting.")
+        dump_regs()
