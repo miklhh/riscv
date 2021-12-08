@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 #
 # RISC-V single core RV32I simulator.
 # The RV32I ISA is described in detail in 'The RISC-V Instruction Set Manual, Volume I: Unpriviledge ISA' and this
@@ -9,6 +9,7 @@
 #
 from elftools.elf.elffile import ELFFile
 import struct
+import debug
 from enum import Enum, auto
 
 
@@ -54,8 +55,8 @@ def to_inst_format(baseop):
 
 # Register file of 32+1 registers. Note especially that register X0 always equal zero and that register X32 is the
 # program counter (PC) register.
+PC = 32
 class Regfile:
-    PC = 32
     def __init__(self):
         self.regfile = [0xDEADCAFE]*33
         self.regfile[0] = 0
@@ -148,7 +149,8 @@ def imm_decode(inst):
 def funct_decode(inst):
     funct3 = get_bits(inst, *downto(14, 12))
     funct7 = get_bits(inst, *downto(31, 25))
-    return (funct3, funct7)
+    funct12 = get_bits(inst, *downto(31, 20))
+    return (funct3, funct7, funct12)
 
 def reg_decode(inst):
     rd  =    get_bits(inst, *downto(11, 7))
@@ -156,51 +158,57 @@ def reg_decode(inst):
     rs2 =    get_bits(inst, *downto(24, 20))
     return (rd, rs1, rs2)
 
-
-
-def DEBUG_PRINT_ASSEMBLY(inst_cnt, PC, string):
-    print("i=" + str(inst_cnt).ljust(8) + "|   PC = " + hex(PC) + "    |    " + string)
-
-def step(inst_cnt):
+def step(cnt):
     # Dump registers.
     #print()
     #dump_regs()
 
     # (1) Instructin fetch
-    inst = r32(regfile[Regfile.PC])
+
+    inst = r32(regfile[PC])
 
     # (2) Instruction decode
     base_op = BaseOp(get_bits(inst, *downto(6, 0)))
-    (rd, rs1, rs2)   = reg_decode(inst)
-    (funct3, funct7) = funct_decode(inst)
-    (imm)            = imm_decode(inst)
+    (rd, rs1, rs2)            = reg_decode(inst)
+    (funct3, funct7, funct12) = funct_decode(inst)
+    (imm)                     = imm_decode(inst)
 
     # (3) Instruction execute
     if base_op == BaseOp.LUI:
-        raise NotImplementedError("LUI")
+        debug.print_asm_di("LUI", cnt, regfile[PC], rd, imm)
+        regfile[rd] = imm
+        regfile[PC] += 4
     elif base_op == BaseOp.AUIPC:
-        raise NotImplementedError("AUIPC")
+        debug.print_asm_di("AUIPC", cnt, regfile[PC], rd, imm)
+        regfile[rd] = regfile[PC] + imm
+        regfile[PC] += 4
     elif base_op == BaseOp.JAL:
-        DEBUG_PRINT_ASSEMBLY(inst_cnt, regfile[Regfile.PC], "J     " + hex(regfile[Regfile.PC] + imm))
+        debug.print_asm_jal(cnt, regfile[PC], rd, imm)
         if rd == 0: # Plain jump instruction
             pass
         else: # Link to rd register
-            regfile[rd] = regfile[Regfile.PC] + 4
-        regfile[Regfile.PC] += imm
+            regfile[rd] = regfile[PC] + 4
+        regfile[PC] += imm
     elif base_op == BaseOp.JALR:
         raise NotImplementedError("JALR")
     elif base_op == BaseOp.BRANCH:
         if funct3 == 0b000:
+            debug.print_asm_ssi("BEQ", cnt, regfile[PC], rs1, rs2, imm)
             raise NotImplementedError("BEQ")
-        elif funct3 == 0b001:
-            raise NotImplementedError("BNE")
-        elif funct3 == 0b100:
+        elif funct3 == 0b001: # BNE
+            debug.print_asm_ssi("BNE", cnt, regfile[PC], rs1, rs2, imm)
+            regfile[PC] += (imm if regfile[rs1] != regfile[rs2] else 4)
+        elif funct3 == 0b100: # BLT
+            debug.print_asm_ssi("BLT", cnt, regfile[PC], rs1, rs2, imm)
             raise NotImplementedError("BLT")
-        elif funct3 == 0b101:
+        elif funct3 == 0b101: # BGE
+            debug.print_asm_ssi("BGE", cnt, regfile[PC], rs1, rs2, imm)
             raise NotImplementedError("BGE")
         elif funct3 == 0b110:
+            debug.print_asm_ssi("BLTU", cnt, regfile[PC], rs1, rs2, imm)
             raise NotImplementedError("BLTU")
         elif funct3 == 0b111:
+            debug.print_asm_ssi("BGEU", cnt, regfile[PC], rs1, rs2, imm)
             raise NotImplementedError("BGEU")
     elif base_op == BaseOp.LOAD:
         if funct3 == 0b000:
@@ -222,12 +230,9 @@ def step(inst_cnt):
             raise NotImplementedError("SW")
     elif base_op == BaseOp.OP_IMM:
         if funct3 == 0b000: # ADDI
-            if rs1 == 0:
-                DEBUG_PRINT_ASSEMBLY(inst_cnt, regfile[Regfile.PC],  "LI    " + ("X" + str(rd)).rjust(3) + ", " + str(imm))
-            elif imm == 0:
-                DEBUG_PRINT_ASSEMBLY(inst_cnt, regfile[Regfile.PC], "MV    " + ("X" + str(rd)) + ", " + str(rs1))
-            regfile[Regfile.PC] += 4
+            debug.print_asm_addi(cnt, regfile[PC], rd, rs1, imm)
             regfile[rd] = regfile[rs1] + imm
+            regfile[PC] += 4
         elif funct3 == 0b010:
             raise NotImplementedError("SLTI")
         elif funct3 == 0b011:
@@ -239,7 +244,9 @@ def step(inst_cnt):
         elif funct3 == 0b100:
             raise NotImplementedError("XORI")
         elif funct3 == 0b001:
-            raise NotImplementedError("SLLI")
+            debug.print_asm_dsi("SLLI", cnt, regfile[PC], rd, rs1, imm)
+            regfile[rd] = regfile[rs1] << imm
+            regfile[PC] += 4
         elif funct3 == 0b101:
             if funct7 == 0b0000000:
                 raise NotImplementedError("SRLI")
@@ -271,7 +278,21 @@ def step(inst_cnt):
     elif base_op == BaseOp.FENCE:
         raise NotImplementedError("FENCE")
     elif base_op == BaseOp.SYSTEM:
-        raise NotImplementedError("SYSTEM")
+        if funct3 == 0b001:
+            debug.print_asm_csr_nop("CSRRW", cnt, regfile[PC], rd, funct12)
+        elif funct3 == 0b010:
+            debug.print_asm_csr_nop("CSRRS", cnt, regfile[PC], rd, funct12)
+        elif funct3 == 0b011:
+            debug.print_asm_csr_nop("CSRRC", cnt, regfile[PC], rd, funct12)
+        elif funct3 == 0b101:
+            debug.print_asm_csr_nop("CSRRWI", cnt, regfile[PC], rd, funct12)
+        elif funct3 == 0b110:
+            debug.print_asm_csr_nop("CSRRI", cnt, regfile[PC], rd, funct12)
+        elif funct3 == 0b111:
+            debug.print_asm_csr_nop("CSRRCI", cnt, regfile[PC], rd, funct12)
+        else:
+            raise NotImplementedError("SYSTEM")
+        regfile[PC] += 4
 
     return True
 
@@ -331,8 +352,8 @@ def step(inst_cnt):
     #return True
 
 def dump_regs():
-    base_opcode = BaseOp(r32(regfile[Regfile.PC]) & 0x7F)
-    print("  PC: 0x%08x ins: 0x%08x, base_opcode: %s" % (regfile[Regfile.PC], r32(regfile[Regfile.PC]), base_opcode))
+    base_opcode = BaseOp(r32(regfile[PC]) & 0x7F)
+    print("  PC: 0x%08x ins: 0x%08x, base_opcode: %s" % (regfile[PC], r32(regfile[PC]), base_opcode))
     for i in range (4):
         for j in range(8):
             reg = j + i*8
@@ -364,14 +385,14 @@ def load_elf(infile):
 
 if __name__ == '__main__':
     load_elf('riscv-tests/isa/rv32ui-p-add')
-    regfile[Regfile.PC] = memory_offset
+    regfile[PC] = memory_offset
     try:
-        inst_cnt = 0
+        cnt = 0
         running = True
-        while running and step(inst_cnt):
-            if inst_cnt > 100:
+        while running and step(cnt):
+            if cnt > 100:
                 running = False
-            inst_cnt += 1
+            cnt += 1
     except NotImplementedError as e:
         print("Instruction not implemented yet: '" + str(e) + "', exiting.")
         dump_regs()
