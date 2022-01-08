@@ -3,9 +3,9 @@ use std::error::Error;
 use std::fs;
 use std::ops::{Index, IndexMut};
 
-//
-// Memory struct
-//
+/*
+ * Memory struct
+ */
 struct Memory {
     phy_mem: Vec<u8>,
     offset: usize,
@@ -39,6 +39,9 @@ impl Memory {
             }
         }
     }
+    /*
+     * All memory reads/writes use least significant byte first, i.e., little endian memory layout.
+     */
     fn r32(&self, idx: usize) -> u32 {
         let low_low: u8 = self.phy_mem[idx - self.offset + 0];
         let low_high: u8 = self.phy_mem[idx - self.offset + 1];
@@ -47,22 +50,22 @@ impl Memory {
         (high_high as u32) << 24 | (high_low as u32) << 16 | (low_high as u32) << 8 | (low_low as u32)
     }
     fn r16(&self, idx: usize) -> u16 {
-        let low: u8 = self.phy_mem[idx - self.offset].to_ne_bytes()[0];
-        let high: u8 = self.phy_mem[idx - self.offset].to_ne_bytes()[1];
+        let low: u8 = self.phy_mem[idx - self.offset + 0];
+        let high: u8 = self.phy_mem[idx - self.offset + 1];
         (high as u16) << 8 | (low as u16)
     }
     fn r8(&self, idx: usize) -> u8 {
         self.phy_mem[idx - self.offset]
     }
     fn s32(&mut self, idx: usize, data: u32) {
-        self.phy_mem[idx - self.offset + 0] = data.to_ne_bytes()[0];
-        self.phy_mem[idx - self.offset + 1] = data.to_ne_bytes()[1];
-        self.phy_mem[idx - self.offset + 2] = data.to_ne_bytes()[2];
-        self.phy_mem[idx - self.offset + 3] = data.to_ne_bytes()[3];
+        self.phy_mem[idx - self.offset + 0] = ((data >> 0) & 0xff) as u8;
+        self.phy_mem[idx - self.offset + 1] = ((data >> 8) & 0xff) as u8;
+        self.phy_mem[idx - self.offset + 2] = ((data >> 16) & 0xff) as u8;
+        self.phy_mem[idx - self.offset + 3] = ((data >> 24) & 0xff) as u8;
     }
     fn s16(&mut self, idx: usize, data: u16) {
-        self.phy_mem[idx - self.offset + 0] = data.to_ne_bytes()[0];
-        self.phy_mem[idx - self.offset + 1] = data.to_ne_bytes()[1];
+        self.phy_mem[idx - self.offset + 0] = ((data >> 0) & 0xff) as u8;
+        self.phy_mem[idx - self.offset + 1] = ((data >> 8) & 0xff) as u8;
     }
     fn s8(&mut self, idx: usize, data: u8) {
         self.phy_mem[idx - self.offset] = data;
@@ -149,10 +152,7 @@ fn main() {
     let mut memory = Memory::new(0x2000);
 
     // Read ELF from file into memory
-    let (mut memory, entry_addr) = read_elf("../riscv-tests/isa/rv32ui-p-add", &mut memory).unwrap();
-
-    // Dump memory
-    memory.dump_stdout();
+    let entry_addr: u32 = read_elf("../riscv-tests/isa/rv32ui-p-add", &mut memory).unwrap();
 
     // Create cpu and step through program
     let mut cpu = Cpu::new(memory, entry_addr);
