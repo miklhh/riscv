@@ -11,7 +11,7 @@ Libraries:
     #Point to the IEEE standard libraries
     - name: ieee
       paths:
-        - "rtl/1076.1-2017/ieee/*.vhdl"
+        - "1076.1-2017/ieee/*.vhdl"
 
 
 Preferences:
