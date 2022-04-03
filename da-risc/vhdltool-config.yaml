@@ -5,14 +5,13 @@ Libraries:
     - name: work
     #The paths where the source files for this library can be found. Use "**" to match arbitrarily nested directories.
       paths: 
-        - "alu.vhdl"
-        - "top.vhdl"
+        - "rtl/*.vhdl"
 
 
     #Point to the IEEE standard libraries
     - name: ieee
       paths:
-        - "1076.1-2017/ieee/*.vhdl"
+        - "rtl/1076.1-2017/ieee/*.vhdl"
 
 
 Preferences:
